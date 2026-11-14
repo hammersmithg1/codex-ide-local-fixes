@@ -108,14 +108,17 @@ def persist(server, name, home):
     print('Saved refreshed ChatGPT session to setec.')
 
 
-def run_codex(home, workspace, prompt, output, sandbox='workspace-write'):
+def run_codex(home, workspace, prompt, output, sandbox='workspace-write', schema=None):
     auth = validate_auth((home / 'auth.json').read_bytes())
     mask_auth(auth)
     environment = {k: v for k, v in os.environ.items() if k not in (
         'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN')}
     environment['CODEX_HOME'] = str(home)
     command = ['codex', 'exec', '--ephemeral', '--sandbox', sandbox, '--color', 'never',
-               '--cd', str(workspace), '-o', str(output), '-']
+               '--cd', str(workspace), '-o', str(output)]
+    if schema:
+        command.extend(['--output-schema', str(schema)])
+    command.append('-')
     return subprocess.run(command, input=prompt, text=True, env=environment, timeout=1200).returncode
 
 
@@ -151,7 +154,14 @@ def main():
                 print('Subscription smoke check passed.')
             else:
                 prompt = (Path(__file__).parent / 'prompts/adapt.md').read_text()
-                return run_codex(args.home, args.workspace, prompt, args.output)
+                result = run_codex(args.home, args.workspace, prompt, args.output,
+                                   schema=Path(__file__).parent / 'adaptation.schema.json')
+                if result:
+                    return result
+                report = json.loads(args.output.read_text())
+                if report.get('status') not in ('verified', 'adapted') or not report.get('checks'):
+                    raise AuthError('Codex could not complete required checks; adaptation is blocked.')
+                print('Codex adaptation result:', report['status'])
         return 0
     except (AuthError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         # Exception payloads from credentials/remote responses must never enter logs.

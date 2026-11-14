@@ -80,6 +80,16 @@ class SubscriptionTests(unittest.TestCase):
                 self.assertFalse(any(key in environment for key in ['OPENAI_API_KEY','CODEX_API_KEY','GH_TOKEN']))
                 self.assertEqual(environment['CODEX_HOME'], str(self.home))
 
+    def test_zero_exit_with_blocked_report_is_a_ci_failure(self):
+        self.restore()
+        output = Path(self.temp.name) / 'report.json'
+        for status, checks, expected in [('blocked',[],1),('verified',[],1),('verified',['unit tests'],0)]:
+            with self.subTest(status=status,checks=checks):
+                output.write_text(json.dumps({'status':status,'checks':checks,'summary':'test'}))
+                args=['subscription.py','adapt','--home',str(self.home),'--output',str(output)]
+                with patch.object(subscription.sys,'argv',args), patch.object(subscription,'run_codex',return_value=0):
+                    self.assertEqual(subscription.main(),expected)
+
 
 if __name__ == '__main__':
     unittest.main()

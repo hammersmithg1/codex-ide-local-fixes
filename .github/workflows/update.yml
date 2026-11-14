@@ -83,6 +83,9 @@ jobs:
       - name: Install Codex CLI for adaptation
         if: steps.compatible.outcome == 'failure' || inputs.force_agent
         run: npm install --global @openai/codex@0.169.0
+      - name: Prepare Codex command sandbox
+        if: steps.compatible.outcome == 'failure' || inputs.force_agent
+        run: bash "$RUNNER_TEMP/trusted-ci/setup_sandbox.sh"
       - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4
         if: steps.compatible.outcome == 'failure' || inputs.force_agent
         with:

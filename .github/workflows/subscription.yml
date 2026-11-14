@@ -32,6 +32,8 @@ jobs:
           node-version: '22'
       - name: Install Codex CLI
         run: npm install --global @openai/codex@0.169.0
+      - name: Prepare Codex command sandbox
+        run: bash ci/setup_sandbox.sh
       - name: Inspect public OIDC identity claims
         env:
           TS_CI_AUDIENCE: ${{ vars.TS_CI_AUDIENCE }}
