@@ -1,5 +1,6 @@
 import importlib.util
 import gzip
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -39,7 +40,8 @@ class UpstreamTests(unittest.TestCase):
             target = root/'upstream'
             (target/'patched/out').mkdir(parents=True)
             (target/'patched/webview/assets').mkdir(parents=True)
-            package = {'name':'chatgpt','publisher':'openai','version':'26.2.10','__metadata':{'id':'upstream-id'}}
+            package = {'name':'chatgpt','publisher':'openai','version':'26.2.10',
+                       '__metadata':{'id':'upstream-id'},'contributes':{'commands':[]}}
             (target/'patched/package.json').write_text(json.dumps(package))
             (target/'patched/out/extension.js').write_text('const id="openai.chatgpt";')
             (target/'patched/LICENSE.md').write_text('Original notice retained.\n')
@@ -60,6 +62,11 @@ class UpstreamTests(unittest.TestCase):
                 package = json.loads(archive.read('extension/package.json'))
                 self.assertEqual(package['publisher']+'.'+package['name'],upstream.LOCAL_ID)
                 self.assertNotIn('__metadata',package)
+                self.assertEqual(package['version'], upstream.package_version('26.2.10'))
+                self.assertEqual(package['main'],'./out/local-entry.cjs')
+                self.assertEqual(package['codexLocalFixes']['platform'],'darwin-arm64')
+                for file in ['local-entry.cjs','local-updater.cjs','github-transport.cjs']:
+                    self.assertIn('extension/out/'+file,archive.namelist())
                 self.assertNotIn('.signature.p7s',archive.namelist())
                 self.assertIn('extension/webview/assets/codex-local-bootstrap.js',archive.namelist())
                 self.assertEqual(archive.read('extension/LICENSE.md'),b'Original notice retained.\n')
@@ -68,12 +75,29 @@ class UpstreamTests(unittest.TestCase):
                 self.assertEqual(identity.attrib['Id'],'codex-local-fixes')
                 self.assertEqual(identity.attrib['Publisher'],'hammersmithg1')
                 self.assertEqual(identity.attrib['TargetPlatform'],'darwin-arm64')
+                self.assertEqual(identity.attrib['Version'],package['version'])
                 manifest_bytes=archive.read('extension.vsixmanifest')
                 self.assertIn(b'<PackageManifest ',manifest_bytes)
                 self.assertIn(b'<Metadata>',manifest_bytes)
                 self.assertIn(b'<Identity ',manifest_bytes)
                 self.assertNotIn(b'<ns0:',manifest_bytes)
                 self.assertNotIn(b'openai.chatgpt',archive.read('extension/out/extension.js'))
+            feed=json.loads((root/'output/codex-update-darwin-arm64.json').read_text())
+            self.assertEqual(feed['version'],package['version'])
+            self.assertEqual(feed['assetName'],result.name)
+            self.assertEqual(feed['size'],result.stat().st_size)
+            self.assertEqual(feed['sha256'],hashlib.sha256(result.read_bytes()).hexdigest())
+
+    def test_local_revision_is_ordered_between_upstream_versions(self):
+        def numbers(v):return tuple(map(int,v.split('.')))
+        with patch.object(upstream,'build_revision',return_value=1):
+            first=upstream.package_version('26.2.10')
+            next_upstream=upstream.package_version('26.2.11')
+        with patch.object(upstream,'build_revision',return_value=2):
+            second=upstream.package_version('26.2.10')
+        self.assertLess(numbers('26.2.10'),numbers(first))
+        self.assertLess(numbers(first),numbers(second))
+        self.assertLess(numbers(second),numbers(next_upstream))
 
     def test_archive_paths_are_checked_before_extraction(self):
         with tempfile.TemporaryDirectory() as temp:

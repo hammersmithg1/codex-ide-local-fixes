@@ -47,7 +47,11 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          if gh release view "codex-$version-$PLATFORM" >/dev/null 2>&1; then
+          expected="$(python3 ci/upstream.py package-version --version "$version")"
+          if gh release download "codex-$version-$PLATFORM" --pattern "codex-update-$PLATFORM.json" \
+              --dir "$RUNNER_TEMP/current-release" >/dev/null 2>&1 && \
+              python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["version"] == sys.argv[2]' \
+              "$RUNNER_TEMP/current-release/codex-update-$PLATFORM.json" "$expected"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -149,6 +153,7 @@ jobs:
           python3 -m unittest discover -s tests -v
           node tests/history.cjs
           node tests/recovery.cjs
+          node tests/updater.cjs
           python3 ci/upstream.py fetch --version "$VERSION" --platform "$PLATFORM" --target /tmp/codex-verify
           python3 ci/upstream.py verify --target /tmp/codex-verify
           python3 ci/upstream.py package --target /tmp/codex-verify --platform "$PLATFORM" --output "$RUNNER_TEMP/packages"
@@ -156,7 +161,7 @@ jobs:
         with:
           name: patched-vsix
           compression-level: 0
-          path: ${{ runner.temp }}/packages/*.vsix
+          path: ${{ runner.temp }}/packages/*
           if-no-files-found: error
           retention-days: 7
 
@@ -201,3 +206,5 @@ jobs:
               --target "$(git rev-parse HEAD)" --title "Codex $VERSION with local fixes ($PLATFORM)" \
               --notes-file ci/release-notes.md
           fi
+          # Publish the feed only after the complete VSIX is available.
+          gh release upload "codex-$VERSION-$PLATFORM" "$RUNNER_TEMP"/packages/codex-update-*.json --clobber

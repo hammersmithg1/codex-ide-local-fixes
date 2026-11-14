@@ -2,6 +2,7 @@
 """Prepare and verify a locally branded personal VSIX from official upstream."""
 import argparse
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -20,6 +21,18 @@ import install
 
 LOCAL_ID = 'hammersmithg1.codex-local-fixes'
 PLATFORMS = ('darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64', 'win32-arm64')
+
+
+def build_revision():
+    value = json.loads((ROOT / 'ci/build.json').read_text())['revision']
+    if not isinstance(value, int) or not 1 <= value <= 999:
+        raise ValueError('Local revision must be between 1 and 999')
+    return value
+
+
+def package_version(upstream_version):
+    major, minor, patch = map(int, valid_version(upstream_version).split('.'))
+    return f'{major}.{minor}.{patch * 1000 + build_revision()}'
 
 
 def valid_version(version):
@@ -118,6 +131,24 @@ def package(target, platform, output):
     version = valid_version(data['version'])
     data.update(name='codex-local-fixes', publisher='hammersmithg1', displayName='Codex (Local Fixes)')
     data.pop('__metadata', None)
+    data['version'] = package_version(version)
+    data['codexLocalFixes'] = {'upstreamVersion': version, 'revision': build_revision(), 'platform': platform}
+    data['main'] = './out/local-entry.cjs'
+    data['contributes']['commands'].append({
+        'command': 'chatgpt.localCheckForUpdates', 'title': 'Check for Updates (Local Fixes)', 'category': 'Codex'})
+    configuration = data['contributes'].get('configuration', [])
+    if isinstance(configuration, dict):
+        configuration = [configuration]
+    configuration.append({'title': 'Codex Local Fixes', 'properties': {
+        'codexLocalFixes.checkForUpdates': {'type': 'boolean', 'default': True, 'scope': 'application',
+            'description': 'Автоматически проверять новые сборки Codex Local Fixes на GitHub.'}}})
+    data['contributes']['configuration'] = configuration
+    for source_name, destination_name in [
+        ('local-entry.cjs', 'local-entry.cjs'), ('local-updater.cjs', 'local-updater.cjs'),
+        ('github-transport.cjs', 'github-transport.cjs')]:
+        shutil.copy2(ROOT / source_name, patched / 'out' / destination_name)
+        subprocess.run(['node', '--check', str(patched / 'out' / destination_name)],
+                       check=True, capture_output=True)
     package_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
     # This ID is also used for the installed version, Settings link, and OAuth URI.
     # Commands/views keep their IDs; disable official Codex before installing.
@@ -129,8 +160,7 @@ def package(target, platform, output):
     install.syntax_check({'out/extension.js': source.encode()})
     host.write_text(source)
     manifest = ET.parse(target / 'unpacked/extension.vsixmanifest')
-    # VS Code reads unprefixed PackageManifest/Metadata/Identity keys. ElementTree
-    # otherwise emits ns0:* tags and VS Code silently treats the package as universal.
+    # Preserve upstream's default namespace and explicit platform for VSIX tools.
     namespace = manifest.getroot().tag.partition('}')[0].removeprefix('{')
     if manifest.getroot().tag.startswith('{'):
         ET.register_namespace('', namespace)
@@ -138,6 +168,7 @@ def package(target, platform, output):
     identity.set('Id', data['name'])
     identity.set('Publisher', data['publisher'])
     identity.set('TargetPlatform', platform)
+    identity.set('Version', data['version'])
     for element in manifest.iter():
         if element.tag.split('}')[-1] == 'DisplayName':
             element.text = data['displayName']
@@ -163,19 +194,29 @@ def package(target, platform, output):
             if path.is_file() and name not in written:
                 result.write(path, name)
     print('Built personal VSIX:', destination.name)
+    digest = hashlib.sha256()
+    with destination.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    feed = {'schema': 1, 'platform': platform, 'version': data['version'],
+            'upstreamVersion': version, 'revision': build_revision(),
+            'assetName': destination.name, 'sha256': digest.hexdigest(), 'size': destination.stat().st_size}
+    (output / f'codex-update-{platform}.json').write_text(json.dumps(feed, indent=2) + '\n')
     return destination
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['latest', 'fetch', 'verify', 'package'])
+    parser.add_argument('mode', choices=['latest', 'fetch', 'verify', 'package', 'package-version'])
     parser.add_argument('--platform', choices=PLATFORMS, default='darwin-arm64')
     parser.add_argument('--version')
     parser.add_argument('--target', type=Path)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     try:
-        if args.mode == 'latest':
+        if args.mode == 'package-version':
+            print(package_version(args.version))
+        elif args.mode == 'latest':
             print(latest(args.platform))
         elif args.mode == 'fetch':
             fetch(args.version, args.platform, args.target)
