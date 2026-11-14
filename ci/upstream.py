@@ -129,9 +129,15 @@ def package(target, platform, output):
     install.syntax_check({'out/extension.js': source.encode()})
     host.write_text(source)
     manifest = ET.parse(target / 'unpacked/extension.vsixmanifest')
+    # VS Code reads unprefixed PackageManifest/Metadata/Identity keys. ElementTree
+    # otherwise emits ns0:* tags and VS Code silently treats the package as universal.
+    namespace = manifest.getroot().tag.partition('}')[0].removeprefix('{')
+    if manifest.getroot().tag.startswith('{'):
+        ET.register_namespace('', namespace)
     identity = next(element for element in manifest.iter() if element.tag.split('}')[-1] == 'Identity')
     identity.set('Id', data['name'])
     identity.set('Publisher', data['publisher'])
+    identity.set('TargetPlatform', platform)
     for element in manifest.iter():
         if element.tag.split('}')[-1] == 'DisplayName':
             element.text = data['displayName']

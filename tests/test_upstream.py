@@ -67,6 +67,12 @@ class UpstreamTests(unittest.TestCase):
                               if e.tag.split('}')[-1]=='Identity')
                 self.assertEqual(identity.attrib['Id'],'codex-local-fixes')
                 self.assertEqual(identity.attrib['Publisher'],'hammersmithg1')
+                self.assertEqual(identity.attrib['TargetPlatform'],'darwin-arm64')
+                manifest_bytes=archive.read('extension.vsixmanifest')
+                self.assertIn(b'<PackageManifest ',manifest_bytes)
+                self.assertIn(b'<Metadata>',manifest_bytes)
+                self.assertIn(b'<Identity ',manifest_bytes)
+                self.assertNotIn(b'<ns0:',manifest_bytes)
                 self.assertNotIn(b'openai.chatgpt',archive.read('extension/out/extension.js'))
 
     def test_archive_paths_are_checked_before_extraction(self):

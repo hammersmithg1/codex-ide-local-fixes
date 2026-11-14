@@ -2,6 +2,10 @@ name: Build patched Codex
 on:
   workflow_dispatch:
     inputs:
+      rebuild:
+        type: boolean
+        default: false
+        description: Rebuild and replace an existing VSIX after independent validation
       force_agent:
         type: boolean
         default: false
@@ -51,7 +55,7 @@ jobs:
 
   prepare:
     needs: probe
-    if: needs.probe.outputs.exists != 'true' || inputs.force_agent
+    if: needs.probe.outputs.exists != 'true' || inputs.force_agent || inputs.rebuild
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
@@ -158,7 +162,7 @@ jobs:
 
   publish:
     needs: [probe, verify]
-    if: needs.probe.outputs.exists != 'true'
+    if: needs.probe.outputs.exists != 'true' || inputs.rebuild
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -190,6 +194,10 @@ jobs:
             git commit -m "Adapt local fixes for Codex $VERSION"
             git push origin HEAD:main
           fi
-          gh release create "codex-$VERSION-$PLATFORM" "$RUNNER_TEMP"/packages/*.vsix \
-            --target "$(git rev-parse HEAD)" --title "Codex $VERSION with local fixes ($PLATFORM)" \
-            --notes-file ci/release-notes.md
+          if gh release view "codex-$VERSION-$PLATFORM" >/dev/null 2>&1; then
+            gh release upload "codex-$VERSION-$PLATFORM" "$RUNNER_TEMP"/packages/*.vsix --clobber
+          else
+            gh release create "codex-$VERSION-$PLATFORM" "$RUNNER_TEMP"/packages/*.vsix \
+              --target "$(git rev-parse HEAD)" --title "Codex $VERSION with local fixes ($PLATFORM)" \
+              --notes-file ci/release-notes.md
+          fi
