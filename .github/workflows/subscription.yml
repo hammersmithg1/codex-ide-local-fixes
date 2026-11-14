@@ -17,10 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      CODEX_HOME: ${{ runner.temp }}/codex-subscription
       SETEC_SERVER: ${{ vars.SETEC_SERVER }}
       SETEC_CODEX_AUTH_NAME: devices/codex-ide-ci/CODEX_AUTH_JSON
     steps:
+      - name: Set private credential directory
+        run: echo "CODEX_HOME=$RUNNER_TEMP/codex-subscription" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
