@@ -39,7 +39,7 @@ def discover(home=None):
     return sorted(set(found))
 
 
-def select_extension(explicit):
+def select_extension(explicit, allow_compatible=False):
     if explicit:
         extension = explicit.expanduser().resolve()
     else:
@@ -51,7 +51,7 @@ def select_extension(explicit):
     package = json.loads((extension / 'package.json').read_text(encoding='utf-8'))
     if package.get('publisher') != 'openai' or package.get('name') != 'chatgpt':
         raise ValueError('This is not the official openai.chatgpt extension')
-    if package.get('version') not in patches.PROFILES:
+    if package.get('version') not in patches.PROFILES and not allow_compatible:
         raise ValueError(f"Supported versions: {', '.join(patches.PROFILES)}; found: {package.get('version')}. Nothing changed.")
     return extension, package
 
@@ -70,9 +70,13 @@ def syntax_check(plan):
             subprocess.run([node, '--check', str(path)], check=True, capture_output=True)
 
 
-def plan_changes(extension, package):
+def plan_changes(extension, package, allow_compatible=False):
     version = package['version']
-    profile = patches.PROFILES[version]
+    if allow_compatible and version != patches.LEGACY_VERSION:
+        import compatibility
+        profile = compatibility.infer_profile(extension)
+    else:
+        profile = patches.PROFILES[version]
     assets = extension / 'webview/assets'
     headers = [path for path in assets.glob('header-*.js')
                if 'header.recentTasks.seeAll' in path.read_text(encoding='utf-8')]
@@ -89,13 +93,15 @@ def plan_changes(extension, package):
         commands.append({'command': patches.COMMAND, 'title': 'Reload Codex UI (Local Fix)', 'category': 'Codex'})
     plan = {
         str(header.relative_to(extension)).replace(os.sep, '/'):
-            patches.history(header.read_text(encoding='utf-8'), contexts[0].name, version).encode(),
-        'out/extension.js': patches.recovery((extension / 'out/extension.js').read_text(encoding='utf-8'), version).encode(),
+            patches.history(header.read_text(encoding='utf-8'), contexts[0].name, version, profile).encode(),
+        'out/extension.js': patches.recovery((extension / 'out/extension.js').read_text(encoding='utf-8'), version, profile).encode(),
         'webview/index.html': patches.bootstrap_html((extension / 'webview/index.html').read_text(encoding='utf-8')).encode(),
         'webview/assets/codex-local-bootstrap.js': (patches.ROOT / 'bootstrap.js').read_bytes(),
         'package.json': (json.dumps(new_package, ensure_ascii=False, indent=2) + '\n').encode(),
     }
     syntax_check(plan)
+    if profile.get('inferred'):
+        compatibility.verify_plan(plan, profile, patches.ROOT)
     return plan
 
 
@@ -234,6 +240,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--extension-dir', type=Path)
     parser.add_argument('--state-dir', type=Path, help='Override the local backup directory')
+    parser.add_argument('--compatible', action='store_true',
+                        help='Recognize the known architecture even if version/asset/identifier names changed; run runtime checks')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--check', action='store_true', help='Validate compatibility without modifying the extension')
     mode.add_argument('--restore', action='store_true')
@@ -243,7 +251,7 @@ def main():
         if args.diagnose:
             diagnose()
             return 0
-        extension, package = select_extension(args.extension_dir)
+        extension, package = select_extension(args.extension_dir, args.compatible)
         state = args.state_dir or (Path.home() / '.agents/local/backups/codex-ide-local-fixes' / digest(str(extension).encode())[:16])
         if args.restore:
             restore(extension, state)
@@ -251,13 +259,13 @@ def main():
             verify_installed(extension, json.loads((state / 'record.json').read_text(encoding='utf-8')))
             print('Already installed; files verified.')
         else:
-            plan = plan_changes(extension, package)
+            plan = plan_changes(extension, package, args.compatible)
             if args.check:
                 print(f'Compatible: {extension}. JavaScript syntax checks passed; no extension files changed.')
             else:
                 apply(extension, plan, state, package['version'])
         return 0
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f'Error: {error}', file=sys.stderr)
         return 1
 

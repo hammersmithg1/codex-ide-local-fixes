@@ -35,7 +35,15 @@ def replace_once(source, old, new):
     return source.replace(old, new, 1)
 
 
-def history(source, context_filename, version=VERSION):
+def history(source, context_filename, version=VERSION, profile=None):
+    if profile is not None and profile.get('inferred'):
+        if HISTORY_MARKER in source:
+            return source
+        for old, new in profile['history_changes']:
+            source = replace_once(source, old, new)
+        return (f'import{{{profile["root_export"]} as __codexHistoryRoots,'
+                f'{profile["init_export"]} as __codexHistoryRootsInit}}'
+                f'from"./{context_filename}";\n' + (ROOT / 'history_filter.js').read_text() + source)
     if version not in PROFILES:
         raise ValueError('Unsupported version: ' + version)
     if version == LEGACY_VERSION:
@@ -79,10 +87,10 @@ def _history_legacy(source, context_filename):
             f'from"./{context_filename}";\n' + (ROOT / 'history_filter.js').read_text() + source)
 
 
-def recovery(source, version=VERSION):
+def recovery(source, version=VERSION, profile=None):
     if RECOVERY_MARKER in source:
         return source
-    profile = PROFILES[version]
+    profile = profile or PROFILES[version]
     watchdog, message, vscode = (profile[key] for key in ('watchdog', 'message', 'vscode'))
     start_anchor = f'let s=new {watchdog}({message}=>{{this.logger.error("Webview renderer did not become ready"'
     if source.count(start_anchor) != 1:
