@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare and verify a locally branded personal VSIX from official upstream."""
 import argparse
+import gzip
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -64,6 +65,18 @@ def fetch(version, platform, target):
            f'vsextensions/chatgpt/{version}/vspackage?targetPlatform={platform}')
     subprocess.run(['curl', '--fail', '--silent', '--show-error', '--location', '--retry', '2',
                     '--max-time', '600', '--output', str(archive), url], check=True)
+    # Marketplace may gzip the HTTP response even though the package is a ZIP.
+    # Decode by magic as well as headers so mislabeled responses work too.
+    with archive.open('rb') as stream:
+        compressed = stream.read(2) == b'\x1f\x8b'
+    if compressed:
+        decoded = target / 'upstream.decoded'
+        try:
+            with gzip.open(archive, 'rb') as source, decoded.open('wb') as destination:
+                shutil.copyfileobj(source, destination)
+            decoded.replace(archive)
+        finally:
+            decoded.unlink(missing_ok=True)
     with zipfile.ZipFile(archive) as bundle:
         for entry in bundle.infolist():
             path = PurePosixPath(entry.filename)

@@ -1,4 +1,5 @@
 import importlib.util
+import gzip
 import io
 import json
 from pathlib import Path
@@ -79,6 +80,20 @@ class UpstreamTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'Unsafe archive'):
                     upstream.fetch('26.2.10','darwin-arm64',root/'upstream')
             self.assertFalse((root/'escaped').exists())
+
+    def test_gzipped_marketplace_response_is_decoded_before_opening_vsix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            body = io.BytesIO()
+            with zipfile.ZipFile(body,'w') as archive:
+                archive.writestr('extension/package.json',json.dumps({
+                    'name':'chatgpt','publisher':'openai','version':'26.2.10'}))
+            def download(command, **kwargs):
+                Path(command[command.index('--output')+1]).write_bytes(gzip.compress(body.getvalue()))
+            with patch.object(upstream.subprocess,'run',side_effect=download):
+                upstream.fetch('26.2.10','darwin-arm64',root/'upstream')
+            self.assertTrue(zipfile.is_zipfile(root/'upstream/upstream.vsix'))
+            self.assertTrue((root/'upstream/unpacked/extension/package.json').is_file())
 
 
 if __name__ == '__main__':
