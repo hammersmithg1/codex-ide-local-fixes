@@ -1,0 +1,192 @@
+name: Build patched Codex
+on:
+  workflow_dispatch:
+    inputs:
+      force_agent:
+        type: boolean
+        default: false
+        description: Exercise subscription agent even when structural patches pass
+      platform:
+        type: choice
+        default: darwin-arm64
+        options: [darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64, win32-arm64]
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-subscription-session
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.repository == 'hammersmithg1/codex-ide-local-fixes' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.actor == github.repository_owner)
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.probe.outputs.version }}
+      platform: ${{ steps.probe.outputs.platform }}
+      exists: ${{ steps.probe.outputs.exists }}
+      sha: ${{ steps.probe.outputs.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check official Marketplace version
+        id: probe
+        env:
+          PLATFORM: ${{ inputs.platform || 'darwin-arm64' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(python3 ci/upstream.py latest --platform "$PLATFORM")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if gh release view "codex-$version-$PLATFORM" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  prepare:
+    needs: probe
+    if: needs.probe.outputs.exists != 'true' || inputs.force_agent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SETEC_SERVER: ${{ vars.SETEC_SERVER }}
+      SETEC_CODEX_AUTH_NAME: devices/codex-ide-ci/CODEX_AUTH_JSON
+      CODEX_TEST_EXTENSION_DIR: /tmp/codex-upstream/unpacked/extension
+      PLATFORM: ${{ needs.probe.outputs.platform }}
+      VERSION: ${{ needs.probe.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.probe.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Prepare official package
+        run: |
+          python3 ci/upstream.py fetch --version "$VERSION" --platform "$PLATFORM" --target /tmp/codex-upstream
+          cp -R ci "$RUNNER_TEMP/trusted-ci"
+          echo "CODEX_HOME=$RUNNER_TEMP/codex-subscription" >> "$GITHUB_ENV"
+      - name: Try compatible patches
+        id: compatible
+        continue-on-error: true
+        run: python3 ci/upstream.py verify --target /tmp/codex-upstream
+      - name: Install Codex CLI for adaptation
+        if: steps.compatible.outcome == 'failure' || inputs.force_agent
+        run: npm install --global @openai/codex@0.169.0
+      - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4
+        if: steps.compatible.outcome == 'failure' || inputs.force_agent
+        with:
+          oauth-client-id: ${{ vars.TS_CI_CLIENT_ID }}
+          audience: ${{ vars.TS_CI_AUDIENCE }}
+          tags: tag:github-ci
+          hostname: codex-adapt-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Enable Tailscale web client
+        if: steps.compatible.outcome == 'failure' || inputs.force_agent
+        run: |
+          sudo tailscale set --webclient=true
+          sudo tailscale debug prefs | python3 -c 'import json,sys; assert json.load(sys.stdin)["RunWebClient"]'
+      - name: Restore dedicated subscription
+        if: steps.compatible.outcome == 'failure' || inputs.force_agent
+        run: python3 "$RUNNER_TEMP/trusted-ci/subscription.py" restore
+      - name: Adapt patches with Codex subscription
+        if: steps.compatible.outcome == 'failure' || inputs.force_agent
+        run: python3 "$RUNNER_TEMP/trusted-ci/subscription.py" adapt --output "$RUNNER_TEMP/adaptation.txt"
+      - name: Persist refreshed subscription
+        if: always() && (steps.compatible.outcome == 'failure' || inputs.force_agent)
+        run: python3 "$RUNNER_TEMP/trusted-ci/subscription.py" persist
+      - name: Remove runner credentials
+        if: always() && (steps.compatible.outcome == 'failure' || inputs.force_agent)
+        run: python3 "$RUNNER_TEMP/trusted-ci/subscription.py" clean
+      - name: Export adapter changes
+        run: python3 "$RUNNER_TEMP/trusted-ci/export_patch.py" export "$RUNNER_TEMP/adapter.patch"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: adapter-patch
+          path: ${{ runner.temp }}/adapter.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    needs: [probe, prepare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PLATFORM: ${{ needs.probe.outputs.platform }}
+      VERSION: ${{ needs.probe.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.probe.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: adapter-patch
+          path: ${{ runner.temp }}/patch
+      - name: Apply only allowed adapter changes
+        run: python3 ci/export_patch.py apply "$RUNNER_TEMP/patch/adapter.patch"
+      - name: Test without access to subscription credentials
+        run: |
+          python3 -m unittest discover -s tests -v
+          node tests/history.cjs
+          node tests/recovery.cjs
+          python3 ci/upstream.py fetch --version "$VERSION" --platform "$PLATFORM" --target /tmp/codex-verify
+          python3 ci/upstream.py verify --target /tmp/codex-verify
+          python3 ci/upstream.py package --target /tmp/codex-verify --platform "$PLATFORM" --output "$RUNNER_TEMP/packages"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: patched-vsix
+          compression-level: 0
+          path: ${{ runner.temp }}/packages/*.vsix
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [probe, verify]
+    if: needs.probe.outputs.exists != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      PLATFORM: ${{ needs.probe.outputs.platform }}
+      VERSION: ${{ needs.probe.outputs.version }}
+      EXPECTED_SHA: ${{ needs.probe.outputs.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: adapter-patch
+          path: ${{ runner.temp }}/patch
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: patched-vsix
+          path: ${{ runner.temp }}/packages
+      - name: Save tested adaptation and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 ci/export_patch.py apply "$RUNNER_TEMP/patch/adapter.patch"
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m "Adapt local fixes for Codex $VERSION"
+            git push origin HEAD:main
+          fi
+          gh release create "codex-$VERSION-$PLATFORM" "$RUNNER_TEMP"/packages/*.vsix \
+            --target "$(git rev-parse HEAD)" --title "Codex $VERSION with local fixes ($PLATFORM)" \
+            --notes-file ci/release-notes.md

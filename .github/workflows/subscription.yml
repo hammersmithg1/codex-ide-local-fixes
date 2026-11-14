@@ -1,6 +1,8 @@
 name: Codex subscription
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '43 4 * * 1'
 
 permissions:
   contents: read
@@ -13,7 +15,7 @@ concurrency:
 
 jobs:
   smoke:
-    if: github.repository == 'hammersmithg1/codex-ide-local-fixes' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    if: github.repository == 'hammersmithg1/codex-ide-local-fixes' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.actor == github.repository_owner)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
