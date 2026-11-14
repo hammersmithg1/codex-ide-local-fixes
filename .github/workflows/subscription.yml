@@ -1,0 +1,53 @@
+name: Codex subscription
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# Refresh tokens rotate. Never cancel a job or run two copies of this session.
+concurrency:
+  group: codex-subscription-session
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: github.event.repository.private && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CODEX_HOME: ${{ runner.temp }}/codex-subscription
+      SETEC_SERVER: ${{ vars.SETEC_SERVER }}
+      SETEC_CODEX_AUTH_NAME: devices/codex-ide-ci/CODEX_AUTH_JSON
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Install Codex CLI
+        run: npm install --global @openai/codex@0.169.0
+      - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4
+        with:
+          oauth-client-id: ${{ vars.TS_CI_CLIENT_ID }}
+          audience: ${{ vars.TS_CI_AUDIENCE }}
+          tags: tag:github-ci
+          hostname: codex-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Enable Tailscale web client
+        run: |
+          sudo tailscale set --webclient=true
+          sudo tailscale debug prefs | python3 -c 'import json,sys; assert json.load(sys.stdin)["RunWebClient"]'
+      - name: Restore dedicated subscription session
+        run: python3 ci/subscription.py restore
+      - name: Check subscription login
+        run: |
+          codex login status
+          python3 ci/subscription.py smoke --output "$RUNNER_TEMP/codex-answer.txt"
+      - name: Persist refreshed subscription session
+        if: always()
+        run: python3 ci/subscription.py persist
+      - name: Remove runner credentials
+        if: always()
+        run: python3 ci/subscription.py clean
