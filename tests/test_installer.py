@@ -72,6 +72,17 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Supported version'):
             installer.select_extension(self.extension)
 
+    def test_both_supported_versions_select_separate_profiles(self):
+        for version in ('26.1021.22027', '26.1111.21308'):
+            with self.subTest(version=version):
+                (self.extension / 'package.json').write_text(json.dumps({
+                    'publisher':'openai', 'name':'chatgpt', 'version':version,
+                }))
+                _, package = installer.select_extension(self.extension)
+                self.assertEqual(package['version'], version)
+        self.assertNotEqual(installer.patches.PROFILES['26.1021.22027']['context_glob'],
+                            installer.patches.PROFILES['26.1111.21308']['context_glob'])
+
     def test_discover_uses_active_installation(self):
         root = self.root / '.vscode/extensions'
         root.mkdir(parents=True)

@@ -6,8 +6,16 @@ if(!preview){console.log('Set CODEX_TEST_EXTENSION_PREVIEW for actual bundle int
 const source=fs.readFileSync(preview,'utf8');
 const start=source.indexOf('async initializeWebview(e,r,n,o){');
 const end=source.indexOf('onPanelReady(e){',start);
-const watchdogStart=source.indexOf('K2=class{');
-const watchdogEnd=source.indexOf(';var Oje=',watchdogStart);
+const initializer=source.slice(start,end);
+const watchdogName=initializer.match(/let s=new ([\w$]+)\(/)?.[1];
+assert.ok(watchdogName,'known watchdog creation');
+const watchdogStart=source.indexOf(watchdogName+'=class{');
+const watchdogEnd=source.indexOf('};',watchdogStart)+1;
+assert.ok(watchdogStart>=0 && watchdogEnd>watchdogStart,'known watchdog class boundaries');
+const vscodeName=initializer.match(/let i=([\w$]+)\.Uri\.joinPath/)?.[1];
+const schemaName=initializer.match(/let c=([\w$]+)\.safeParse/)?.[1];
+const snapshotName=initializer.match(/\.\.\.([\w$]+)\("local","stdio"/)?.[1];
+const htmlReader=initializer.match(/e\.html=await ([\w$]+)\(this\.extensionUri,e,this\.webviewMetaTags\(e\)\)/)?.[1];
 const helpers=fs.readFileSync(require('node:path').join(__dirname,'..','recovery_host.js'),'utf8');
 const timers=new Map(),events=[],logs=[],disposers=[];
 let timerId=0;
@@ -16,6 +24,10 @@ const context={
   Date,Be:{Uri:{joinPath:(...args)=>args.join('/')},commands:{executeCommand:(...args)=>events.push(args)}},
   g4t:{safeParse:()=>({success:false})},Bx:()=>({type:'snapshot'}),
 };
+context[vscodeName]=context.Be;
+context[schemaName]=context.g4t;
+context[snapshotName]=context.Bx;
+if(htmlReader)context[htmlReader]=async()=>'<head></head><body>healthy-ui</body>';
 vm.createContext(context);
 vm.runInContext(helpers+';var '+source.slice(watchdogStart,watchdogEnd)+';class Provider{'+source.slice(start,end)+'};globalThis.Provider=Provider;',context);
 const provider=new context.Provider();
@@ -31,6 +43,7 @@ Object.assign(provider,{
   registerClientCoordinationForWebview:()=>sessions++,disposeClientCoordinationForWebview:()=>sessionDisposals++,
   workerBusMessageHandler:{registerWebview(){}},chunkedMessageSender:{dispose(){}},
   getWebviewContent:async()=>'<head></head><body>healthy-ui</body>',
+  webviewMetaTags:()=>'',
   sidebarViews:new Set([sidebar]),readySidebarViews:new Set(),sidebarView:sidebar,
   editorPanels:new Map(),findPanelByWebview:()=>undefined,
   pendingContextFiles:[],pendingNavigationRoutes:[],pendingSidebarMessages:[],

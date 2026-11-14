@@ -51,8 +51,8 @@ def select_extension(explicit):
     package = json.loads((extension / 'package.json').read_text(encoding='utf-8'))
     if package.get('publisher') != 'openai' or package.get('name') != 'chatgpt':
         raise ValueError('This is not the official openai.chatgpt extension')
-    if package.get('version') != patches.VERSION:
-        raise ValueError(f"Supported version: {patches.VERSION}; found: {package.get('version')}. Nothing changed.")
+    if package.get('version') not in patches.PROFILES:
+        raise ValueError(f"Supported versions: {', '.join(patches.PROFILES)}; found: {package.get('version')}. Nothing changed.")
     return extension, package
 
 
@@ -71,14 +71,16 @@ def syntax_check(plan):
 
 
 def plan_changes(extension, package):
+    version = package['version']
+    profile = patches.PROFILES[version]
     assets = extension / 'webview/assets'
     headers = [path for path in assets.glob('header-*.js')
-               if 'function _n(e,t,n)' in path.read_text(encoding='utf-8')]
-    contexts = list(assets.glob('thread-context-inputs-*.js'))
+               if 'header.recentTasks.seeAll' in path.read_text(encoding='utf-8')]
+    contexts = list(assets.glob(profile['context_glob']))
     if len(headers) != 1 or len(contexts) != 1:
         raise ValueError('Expected exactly one history module and one workspace-context module')
     context = contexts[0].read_text(encoding='utf-8')
-    if 'W as d' not in context or '$ as s' not in context:
+    if any(anchor not in context for anchor in profile['context_anchors']):
         raise ValueError('Unsupported workspace-context exports')
     header = headers[0]
     new_package = json.loads(json.dumps(package))
@@ -87,8 +89,8 @@ def plan_changes(extension, package):
         commands.append({'command': patches.COMMAND, 'title': 'Reload Codex UI (Local Fix)', 'category': 'Codex'})
     plan = {
         str(header.relative_to(extension)).replace(os.sep, '/'):
-            patches.history(header.read_text(encoding='utf-8'), contexts[0].name).encode(),
-        'out/extension.js': patches.recovery((extension / 'out/extension.js').read_text(encoding='utf-8')).encode(),
+            patches.history(header.read_text(encoding='utf-8'), contexts[0].name, version).encode(),
+        'out/extension.js': patches.recovery((extension / 'out/extension.js').read_text(encoding='utf-8'), version).encode(),
         'webview/index.html': patches.bootstrap_html((extension / 'webview/index.html').read_text(encoding='utf-8')).encode(),
         'webview/assets/codex-local-bootstrap.js': (patches.ROOT / 'bootstrap.js').read_bytes(),
         'package.json': (json.dumps(new_package, ensure_ascii=False, indent=2) + '\n').encode(),
@@ -103,7 +105,7 @@ def original_bytes(extension, name):
     if current is None or patches.HISTORY_MARKER.encode() not in current:
         return current
     # Adopt the previous one-machine patch only with a verified original backup.
-    legacy = Path.home() / f'.agents/local/backups/codex-workspace-history-{patches.VERSION}'
+    legacy = Path.home() / f'.agents/local/backups/codex-workspace-history-{patches.LEGACY_VERSION}'
     record_path = legacy / 'record.json'
     if record_path.exists():
         record = json.loads(record_path.read_text(encoding='utf-8'))
@@ -145,7 +147,7 @@ def verify_installed(extension, record):
             raise ValueError(f'File changed since installation: {name}. Refusing to overwrite it.')
 
 
-def apply(extension, plan, state):
+def apply(extension, plan, state, version=patches.VERSION):
     record_path = state / 'record.json'
     if record_path.exists():
         verify_installed(extension, json.loads(record_path.read_text(encoding='utf-8')))
@@ -154,7 +156,7 @@ def apply(extension, plan, state):
     # Validate every original before creating backups or writing any target file.
     originals = {name: original_bytes(extension, name) for name in plan}
     before = {name: (extension / name).read_bytes() if (extension / name).exists() else None for name in plan}
-    record = {'extension': str(extension), 'version': patches.VERSION, 'files': {}}
+    record = {'extension': str(extension), 'version': version, 'files': {}}
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     for name, data in originals.items():
         saved = state / 'original' / name
@@ -253,7 +255,7 @@ def main():
             if args.check:
                 print(f'Compatible: {extension}. JavaScript syntax checks passed; no extension files changed.')
             else:
-                apply(extension, plan, state)
+                apply(extension, plan, state, package['version'])
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f'Error: {error}', file=sys.stderr)
