@@ -21,6 +21,12 @@ HOOK = ('function @hook@(e){let t=@worktrees@(),n=@signal@(@pending@),'
         'return o.current=new Map(r.map(e=>[e.key,e])),r},[i,a,e,t,n])}')
 
 
+REORDERED_HOOK = (HOOK.replace('i=@family@(@ids@,r),a=@feature@(),o=', 'a=@family@(@ids@,r),o=@feature@(),s=')
+                  .replace('isBackgroundSubagentsEnabled:a,', 'isBackgroundSubagentsEnabled:o,')
+                  .replace('clientThreadIdsByConversationId:i', 'clientThreadIdsByConversationId:a')
+                  .replace('o.current', 's.current').replace('[i,a,e,t,n]', '[a,o,e,t,n]'))
+
+
 def template_pattern(template):
     seen = set()
     parts = []
@@ -44,7 +50,7 @@ def one(pattern, source, description):
 
 def export_name(source, internal):
     exports = source[source.rfind('export{'):]
-    return one(r'(?<![\w$])' + re.escape(internal) + r' as (' + IDENTIFIER + ')',
+    return one(r'(?<![\w$])' + re.escape(internal) + r' as (' + IDENTIFIER + r')(?=[,}])',
                exports, 'export for ' + internal).group(1)
 
 
@@ -55,11 +61,14 @@ def infer_profile(extension):
     if len(headers) != 1:
         raise ValueError('Compatibility check: history module is ambiguous')
     header = headers[0].read_text(encoding='utf-8')
-    hook = one(template_pattern(HOOK), header, 'local history hook')
+    hooks = [match for shape in (HOOK, REORDERED_HOOK)
+             for match in re.finditer(template_pattern(shape), header)]
+    if len(hooks) != 1:
+        raise ValueError(f'Compatibility check: expected one local history hook, found {len(hooks)}')
+    hook = hooks[0]
     symbols = hook.groupdict()
     merge_start = header.index('function ' + symbols['merge'] + '(')
     reuse_start = header.index('function ' + symbols['reuse'] + '(', merge_start)
-    functions_end = header.index('var ', reuse_start)
     merge = header[merge_start:reuse_start]
     symbols.update({
         'predicate': one(r'e\.filter\(e=>(' + IDENTIFIER + r')\(\{conversation:e,isBackgroundSubagentsEnabled:i\}\)\)', merge, 'conversation predicate').group(1),
@@ -83,7 +92,7 @@ def infer_profile(extension):
     context_path, context = context_candidates[0]
     key_function = one(r'function (' + IDENTIFIER + r')\(e\)\{return e==null\?\[`vscode`,`workspace-root-options`\]',
                        context, 'workspace query key').group(1)
-    query = one(r'(?P<root>' + IDENTIFIER + r')=' + IDENTIFIER + r'\(' + IDENTIFIER
+    query = one(r'(?<![\w$])(?P<root>' + IDENTIFIER + r')=' + IDENTIFIER + r'\(' + IDENTIFIER
                 + r',\(\)=>\(\{queryKey:' + re.escape(key_function)
                 + r'\(\{hostId:(?P<host>' + IDENTIFIER + r')\}\),queryFn:\(\{signal:e\}\)=>'
                 + IDENTIFIER + r'\(\{hostId:(?P=host)\},e\),placeholderData:' + IDENTIFIER
@@ -100,39 +109,41 @@ def infer_profile(extension):
     original_hook = hook.group(0)
     patched_hook = original_hook.replace(
         'let t=', f"let __historyRoots={symbols['signal']}(__codexHistoryRoots).data?.roots;let t=", 1)
-    call = (f"{symbols['reuse']}({symbols['merge']}({{localConversations:e,pendingWorktrees:t,"
-            f"pendingThreadStarts:n,threadSortKey:{symbols['sort']},isBackgroundSubagentsEnabled:a,"
-            'clientThreadIdsByConversationId:i}),o.current)')
-    filtered_call = call.replace(symbols['reuse'] + '(', symbols['reuse'] + '(__codexHistoryFilter(', 1)
-    filtered_call = filtered_call.replace('),o.current)', '),__historyRoots,true),o.current)', 1)
-    if patched_hook.count(call) != 1:
-        raise ValueError('Compatibility check: unexpected merge call')
-    patched_hook = patched_hook.replace(call, filtered_call).replace(
-        '[i,a,e,t,n])}', '[i,a,e,t,n,__historyRoots])}', 1)
+    # Wrap the actual merge expression, preserving the upstream binding order.
+    merge_call = one(re.escape(symbols['merge']) + r'\(\{[^{}]+\}\)', patched_hook, 'merge call')
+    patched_hook = (patched_hook[:merge_call.start()] + '__codexHistoryFilter('
+                    + merge_call[0] + ',__historyRoots,true)' + patched_hook[merge_call.end():])
+    patched_hook = patched_hook[:-3] + ',__historyRoots])}'
     initializer = one(r'function ' + IDENTIFIER + r'\(\)\{return\(' + IDENTIFIER + '=' + IDENTIFIER
                       + r'\(\(\(\)=>\{' + re.escape(symbols['uniq']) + r'=', header, 'history initializer')
     init_anchor = initializer.group(0)
 
     host_source = (extension / 'out/extension.js').read_text(encoding='utf-8')
-    init_start = host_source.index('async initializeWebview(e,r,n,o){')
-    init_end = host_source.index('onPanelReady(e){', init_start)
+    initializer_method = one(r'async initializeWebview\((?P<webview>[et]),r,n,o\)\{',
+                             host_source, 'webview initializer')
+    webview = initializer_method['webview']
+    init_start = initializer_method.start()
+    init_end = host_source.index('onPanelReady(' + webview + '){', init_start)
     init = host_source[init_start:init_end]
     vscode = one(r'let i=(' + IDENTIFIER + r')\.Uri\.joinPath\(this.extensionUri,"webview"\)', init, 'VS Code API alias').group(1)
     watchdog = one(r'let s=new (?P<class>' + IDENTIFIER + r')\((?P<message>' + IDENTIFIER
                    + r')=>\{this.logger.error\("Webview renderer did not become ready"', init, 'watchdog creation')
-    message = one(r'e\.onDidReceiveMessage\((' + IDENTIFIER + r')=>\{if\(s.markMessageReceived\(\),', init, 'webview message handler').group(1)
+    message = one(webview + r'\.onDidReceiveMessage\((' + IDENTIFIER + r')=>\{if\(s.markMessageReceived\(\),', init, 'webview message handler').group(1)
     if watchdog['message'] != message:
         raise ValueError('Compatibility check: unexpected timeout callback shape')
-    watchdog_class = one(re.escape(watchdog['class']) + r'=class\{constructor\(e\)\{this.onTimeout=e\}'
-                         r'timeout;disposed=!1;receivedWebviewMessage=!1;start\(\)\{if\(this.disposed\|\|this.timeout!=null\)return;'
-                         r'let e=Date.now\(\);this.timeout=setTimeout\(\(\)=>\{this.timeout=void 0,this.onTimeout\(\{'
-                         r'elapsedMs:Date.now\(\)-e,receivedWebviewMessage:this.receivedWebviewMessage,timeoutMs:3e4\}\)\},3e4\)\}'
-                         r'markMessageReceived\(\)\{this.receivedWebviewMessage=!0\}handleStartupPhase\(e\)\{e==="renderer_ready"&&this.dispose\(\)\}'
-                         r'dispose\(\)\{this.disposed=!0,this.timeout!=null&&\(clearTimeout\(this.timeout\),this.timeout=void 0\)\}\}',
-                         host_source, 'known watchdog behavior')
-    reader = one(r'e\.html=(await (?:this\.getWebviewContent\(e\)|' + IDENTIFIER
-                 + r'\(this.extensionUri,e,this.webviewMetaTags\(e\)\))),s.start\(\)', init, 'HTML reader').group(1)
-    command = one(r'e\.push\((?P<api>' + IDENTIFIER + r')\.commands.registerCommand\("chatgpt.openSidebar",'
+    watchdog_shape = (
+        '=class{constructor(@parameter@){this.onTimeout=@parameter@}'
+        'timeout;disposed=!1;receivedWebviewMessage=!1;start(){if(this.disposed||this.timeout!=null)return;'
+        'let @parameter@=Date.now();this.timeout=setTimeout(()=>{this.timeout=void 0,this.onTimeout({'
+        'elapsedMs:Date.now()-@parameter@,receivedWebviewMessage:this.receivedWebviewMessage,timeoutMs:3e4})},3e4)}'
+        'markMessageReceived(){this.receivedWebviewMessage=!0}handleStartupPhase(@parameter@){@parameter@==="renderer_ready"&&this.dispose()}'
+        'dispose(){this.disposed=!0,this.timeout!=null&&(clearTimeout(this.timeout),this.timeout=void 0)}}')
+    one(re.escape(watchdog['class']) + template_pattern(watchdog_shape),
+        host_source, 'known watchdog behavior')
+    reader = one(webview + r'\.html=(await (?:this\.getWebviewContent\(' + webview + r'\)|' + IDENTIFIER
+                 + r'\(this.extensionUri,' + webview + r',this.webviewMetaTags\(' + webview + r'\)\))),s.start\(\)',
+                 init, 'HTML reader').group(1)
+    command = one(r'(?P<list>[et])\.push\((?P<api>' + IDENTIFIER + r')\.commands.registerCommand\("chatgpt.openSidebar",'
                   r'(?P<open>' + IDENTIFIER + r')\)\),', host_source, 'sidebar command')
     provider = one(r'async\(\)=>\{await ' + re.escape(command['open']) + r'\(\),('
                    + IDENTIFIER + r')\.triggerNewChatViaWebview\(\)\}', host_source, 'provider instance').group(1)
@@ -145,9 +156,9 @@ def infer_profile(extension):
                             (init_anchor, init_anchor.replace('()=>{', '()=>{__codexHistoryRootsInit();', 1))],
         'root_export': root_export, 'init_export': init_export,
         'watchdog': watchdog['class'], 'message': message, 'vscode': vscode,
-        'read_content': reader,
+        'read_content': reader, 'webview': webview,
         'command_anchor': command.group(0),
-        'command_code': (f'e.push({command["api"]}.commands.registerCommand("chatgpt.localReloadUI",'
+        'command_code': (f'{command["list"]}.push({command["api"]}.commands.registerCommand("chatgpt.localReloadUI",'
                          f'async()=>{{await {command["open"]}();await {provider}.localReloadUI()}})),') ,
         'probe': {**symbols, 'functions_end': 'var '},
     }

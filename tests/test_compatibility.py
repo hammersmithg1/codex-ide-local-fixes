@@ -35,29 +35,42 @@ class ActualBundleCompatibilityTests(unittest.TestCase):
         shutil.copytree(os.environ['CODEX_TEST_EXTENSION_DIR'], self.extension)
 
     def test_future_version_and_renamed_assets_and_symbols_install_and_restore(self):
+        profile = compatibility.infer_profile(self.extension)
         assets = self.extension / 'webview/assets'
         header = next(path for path in assets.glob('header-*.js') if 'header.recentTasks.seeAll' in path.read_text())
-        context = next(path for path in assets.glob('app-initial-*.js') if '`workspace-root-options`' in path.read_text())
+        context = assets / profile['context_glob']
         new_context = assets / 'app-initial-simulated-update.js'
-        text = context.read_text()
-        for old, new in [('Ay','FutureWorkspaceRoots'),('Py','FutureWorkspaceInit'),
-                         ('byn','futureRootsExport'),('gyn','futureInitExport')]:
-            text = re.sub(r'\b' + old + r'\b', new, text)
-        new_context.write_text(text)
+
+        def rename(source, pairs):
+            for old, new in pairs:
+                # A minified name can also appear in a Unicode regex property escape.
+                pattern = r'(?<!\\p\{)(?<!\\P\{)(?<![\w$])' + re.escape(old) + r'(?![\w$])'
+                source = re.sub(pattern, new, source)
+            return source
+
+        roots, roots_export = profile['context_anchors'][1].split(' as ')
+        initializer, init_export = profile['context_anchors'][2].split(' as ')
+        new_context.write_text(rename(context.read_text(), [
+            (roots, 'FutureWorkspaceRoots'), (initializer, 'FutureWorkspaceInit'),
+            (roots_export, 'futureRootsExport'), (init_export, 'futureInitExport'),
+        ]))
         context.unlink()
-        text = header.read_text().replace(context.name, new_context.name)
-        for old, new in [('Pt','FutureHistoryHook'),('Je','FutureWorktreeHook'),
-                         ('Y','FutureReact'),('Lt','FutureUniq')]:
-            text = re.sub(r'\b' + old + r'\b', new, text)
+        symbols = profile['probe']
+        text = rename(header.read_text().replace(context.name, new_context.name), [
+            (symbols['hook'], 'FutureHistoryHook'), (symbols['worktrees'], 'FutureWorktreeHook'),
+            (symbols['react'], 'FutureReact'), (symbols['uniq'], 'FutureUniq'),
+        ])
         new_header = assets / 'header-simulated-update.js'
         new_header.write_text(text)
         header.unlink()
         host = self.extension / 'out/extension.js'
-        text = host.read_text()
-        for old, new in [('E2','FutureWatchdog'),('ze','FutureVsCode'),
-                         ('Et','FutureCommands'),('Ct','FutureProvider'),('vi','FutureOpen')]:
-            text = re.sub(r'\b' + old + r'\b', new, text)
-        host.write_text(text)
+        api, open_sidebar = re.search(r'([\w$]+)\.commands\.registerCommand\("chatgpt.openSidebar",([\w$]+)',
+                                      profile['command_anchor']).groups()
+        provider = re.search(r'await ([\w$]+)\.localReloadUI', profile['command_code'])[1]
+        host.write_text(rename(host.read_text(), [
+            (profile['watchdog'], 'FutureWatchdog'), (profile['vscode'], 'FutureVsCode'),
+            (api, 'FutureCommands'), (provider, 'FutureProvider'), (open_sidebar, 'FutureOpen'),
+        ]))
         package = json.loads((self.extension / 'package.json').read_text())
         package['version'] = '99.1231.99999'
         (self.extension / 'package.json').write_text(json.dumps(package))
@@ -70,10 +83,21 @@ class ActualBundleCompatibilityTests(unittest.TestCase):
         restored = {str(path.relative_to(self.extension)):path.read_bytes() for path in self.extension.rglob('*') if path.is_file()}
         self.assertEqual(original, restored)
 
+    def test_changed_history_memo_dependencies_are_rejected(self):
+        profile = compatibility.infer_profile(self.extension)
+        header = next(path for path in (self.extension / 'webview/assets').glob('header-*.js')
+                      if 'header.recentTasks.seeAll' in path.read_text())
+        hook = profile['history_changes'][0][0]
+        self.assertTrue(hook.endswith(',t,n])}'))
+        header.write_text(header.read_text().replace(hook, hook.removesuffix(',t,n])}') + ',t])}', 1))
+        with self.assertRaisesRegex(ValueError, 'expected one local history hook, found 0'):
+            compatibility.infer_profile(self.extension)
+
     def test_changed_watchdog_behavior_is_rejected_without_writes(self):
         path = self.extension / 'out/extension.js'
         source = path.read_text()
-        start = source.index('E2=class{')
+        watchdog = compatibility.infer_profile(self.extension)['watchdog']
+        start = source.index(watchdog + '=class{')
         end = source.index('};', start)+2
         source = source[:start] + source[start:end].replace('3e4', '4e4') + source[end:]
         path.write_text(source)

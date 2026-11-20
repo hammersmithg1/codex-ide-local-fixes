@@ -23,10 +23,12 @@ const items = [
 const worktrees = [
   {hostId:'local',clientThreadId:'pending-rover',sourceWorkspaceRoot:'/work/rover',createdAt:3},
   {hostId:'local',clientThreadId:'pending-ios',sourceWorkspaceRoot:'/work/ios',createdAt:3},
+  {hostId:'other',clientThreadId:'pending-remote',sourceWorkspaceRoot:'/work/rover',createdAt:3},
 ];
 const starts = [
   {hostId:'local',clientThreadId:'starting-rover',task:{cwd:'/work/rover',createdAt:3}},
   {hostId:'local',clientThreadId:'starting-ios',task:{cwd:'/work/ios',createdAt:3}},
+  {hostId:'other',clientThreadId:'starting-remote',task:{cwd:'/work/rover',createdAt:3}},
 ];
 const context = {__codexHistoryRoots:{}};
 context[names.pending] = {};
@@ -58,5 +60,5 @@ assert.deepEqual(render(),['ios','pending-ios','starting-ios']);
 roots=['/work/rover','/work/ios'];
 assert.deepEqual(render(),['ios','pending-ios','pending-rover','rover','starting-ios','starting-rover']);
 roots=undefined;assert.deepEqual(render(),[]);
-roots=[];assert.equal(render().length,8);
+roots=[];assert.equal(render().length,items.length+worktrees.length+starts.length);
 console.log('Generated history hook compatibility checks passed.');

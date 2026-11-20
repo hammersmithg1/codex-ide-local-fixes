@@ -92,34 +92,37 @@ def recovery(source, version=VERSION, profile=None):
         return source
     profile = profile or PROFILES[version]
     watchdog, message, vscode = (profile[key] for key in ('watchdog', 'message', 'vscode'))
+    webview = profile.get('webview', 'e')
+    initializer = f'async initializeWebview({webview},r,n,o){{'
     start_anchor = f'let s=new {watchdog}({message}=>{{this.logger.error("Webview renderer did not become ready"'
     if source.count(start_anchor) != 1:
         raise ValueError('Unsupported watchdog initializer')
     start = source.index(start_anchor)
-    end = source.index('this.registerClientCoordinationForWebview(e,n,s)', start)
+    end = source.index(f'this.registerClientCoordinationForWebview({webview},n,s)', start)
     replacement = '''let __localRecovery;
 let s=new __WATCHDOG__(u=>{void __localRecovery.timeout(u)});
 __localRecovery=__codexCreateRecovery({
   log:(event,fields)=>this.logger.warning("Local webview recovery",{safe:{event,role:r,extensionVersion:this.extensionVersion,...fields},sensitive:{}}),
   cancelTimer:()=>{if(s.timeout!=null)clearTimeout(s.timeout);s.timeout=void 0},
-  failed:()=>{e.html=__codexRecoveryFallback(e.asWebviewUri(__VSCODE__.Uri.joinPath(i,"assets","codex-local-bootstrap.js")).toString(),e.cspSource)},
+  failed:()=>{__WEBVIEW__.html=__codexRecoveryFallback(__WEBVIEW__.asWebviewUri(__VSCODE__.Uri.joinPath(i,"assets","codex-local-bootstrap.js")).toString(),__WEBVIEW__.cspSource)},
   render:async(generation,isCurrent)=>{
     const content=__READ_CONTENT__;
     if(!isCurrent())return;
-    this.disposeClientCoordinationForWebview(e);
-    this.registerClientCoordinationForWebview(e,n,s);
-    const sidebar=Array.from(this.sidebarViews).find(view=>view.webview===e);
+    this.disposeClientCoordinationForWebview(__WEBVIEW__);
+    this.registerClientCoordinationForWebview(__WEBVIEW__,n,s);
+    const sidebar=Array.from(this.sidebarViews).find(view=>view.webview===__WEBVIEW__);
     if(sidebar){this.readySidebarViews.delete(sidebar);if(this.sidebarView===sidebar)this.sidebarWebviewReady=false;}
-    const panel=this.findPanelByWebview(e),panelState=this.editorPanels.get(panel);
+    const panel=this.findPanelByWebview(__WEBVIEW__),panelState=this.editorPanels.get(panel);
     if(panelState)panelState.ready=false;
     s.disposed=false;s.receivedWebviewMessage=false;
-    e.html=content+"<!-- codex-local-reload:"+generation+":"+Date.now()+" -->";
+    __WEBVIEW__.html=content+"<!-- codex-local-reload:"+generation+":"+Date.now()+" -->";
     s.start();
   }
 });
-__codexLocalRecoveryByWebview.set(e,__localRecovery);
+__codexLocalRecoveryByWebview.set(__WEBVIEW__,__localRecovery);
 '''
-    replacement = (replacement.replace('__WATCHDOG__', watchdog)
+    replacement = (replacement.replace('__WEBVIEW__', webview)
+                   .replace('__WATCHDOG__', watchdog)
                    .replace('__VSCODE__', vscode)
                    .replace('__READ_CONTENT__', profile['read_content']))
     source = source[:start] + replacement + source[end:]
@@ -140,15 +143,15 @@ if(s.markMessageReceived(),u.type==="chunked-message-ack")'''
     source = replace_once(source, f'if(s.markMessageReceived(),{message}.type==="chunked-message-ack")', diagnostics)
     source = replace_once(source, f'if({message}.type==="ready"){{if(r==="sidebar")',
                           f'if({message}.type==="ready"){{s.handleStartupPhase("renderer_ready");__localRecovery.markReady();if(r==="sidebar")')
-    source = replace_once(source, 's.dispose(),this.chunkedMessageSender.dispose(e)',
-                          '__localRecovery.dispose(),__codexLocalRecoveryByWebview.delete(e),s.dispose(),this.chunkedMessageSender.dispose(e)')
-    source = replace_once(source, 'async initializeWebview(e,r,n,o){', '''
+    source = replace_once(source, f's.dispose(),this.chunkedMessageSender.dispose({webview})',
+                          f'__localRecovery.dispose(),__codexLocalRecoveryByWebview.delete({webview}),s.dispose(),this.chunkedMessageSender.dispose({webview})')
+    source = replace_once(source, initializer, '''
 async localReloadUI(){
  const panel=this.getActivePanelFocusedView()?.panel;
  const webview=this.focusedView?.kind==="panel"?this.getWebviewForPanel(panel):this.sidebarView?.webview??this.getWebviewForPanel(panel);
  if(webview)await __codexLocalRecoveryByWebview.get(webview)?.reload();
 }
-async initializeWebview(e,r,n,o){''')
+''' + initializer)
     source = replace_once(source, profile['command_anchor'],
                           profile['command_anchor'] + profile['command_code'])
     return source + '\n' + (ROOT / 'recovery_host.js').read_text()
